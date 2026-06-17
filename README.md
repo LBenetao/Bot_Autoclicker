@@ -26,7 +26,7 @@ Biblioteca pynput
 🚀 Instalação
 
 bash# 1. Clone o repositório
-git clone https://github.com/seu-usuario/autobot.git
+git clone https://github.com/LBenetao/Bot_Autoclicer
 cd autobot
 
 # 2. Instale a dependência

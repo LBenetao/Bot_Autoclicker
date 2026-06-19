@@ -1,0 +1,192 @@
+# AutoBot — Registro de Correções de Bugs
+
+> **Arquivo:** `autobot.py`  
+> **Biblioteca:** `pynput`  
+> **Data da revisão:** 2025
+
+---
+
+## Resumo
+
+Durante análise estática e revisão de código foram identificados **8 problemas**, classificados em alta, média e baixa prioridade. Todos foram corrigidos na versão atual do arquivo.
+
+---
+
+## Bugs Corrigidos
+
+### 🔴 Bug #1 — `KeyCode` ausente ao pressionar tecla de caractere
+**Prioridade:** Alta  
+**Função afetada:** `loop_acao()`
+
+**Descrição:**  
+Quando a tecla configurada era um caractere simples (ex: `"l"`, `"a"`, `"1"`), o código passava a `str` diretamente para `kb.press()` e `kb.release()`. O `pynput` exige um objeto `KeyCode` ou `Key` — passar uma `str` pura falha silenciosamente em alguns sistemas operacionais, sem gerar exceção visível.
+
+**Código original:**
+```python
+kb.press(estado["tecla"])
+kb.release(estado["tecla"])
+```
+
+**Correção aplicada:**  
+Criada a função auxiliar `_tecla_para_pynput()` que converte strings para `KeyCode.from_char()` antes de enviar ao controlador.
+
+```python
+def _tecla_para_pynput(tecla):
+    if isinstance(tecla, str):
+        return KeyCode.from_char(tecla)
+    return tecla
+
+t = _tecla_para_pynput(tecla)
+kb.press(t)
+kb.release(t)
+```
+
+---
+
+### 🔴 Bug #4 — Race condition no dicionário `estado` compartilhado entre threads
+**Prioridade:** Alta  
+**Funções afetadas:** `loop_acao()`, `on_key_press()`, menus de configuração
+
+**Descrição:**  
+O dicionário `estado` era lido e escrito por múltiplas threads (thread do loop de ação + thread do listener de hotkeys + thread principal do menu) sem nenhum mecanismo de sincronização. Embora o GIL do CPython reduza o risco de corrupção de dados, isso ainda constitui uma race condition formal, podendo causar comportamento imprevisível em leituras compostas ou trocas de valores entre campos relacionados.
+
+**Correção aplicada:**  
+Criado um `threading.Lock()` global (`estado_lock`). Todos os acessos de leitura e escrita ao dicionário `estado` passam a usar `with estado_lock:`.
+
+```python
+estado_lock = threading.Lock()
+
+# Exemplo de escrita protegida:
+with estado_lock:
+    estado["ativo"] = not estado["ativo"]
+
+# Exemplo de leitura protegida:
+with estado_lock:
+    ativo = estado["ativo"]
+    intervalo = estado["intervalo"]
+```
+
+---
+
+### 🟠 Bug #2 — Teclas `f5` e `f9` presentes em dois dicionários simultaneamente
+**Prioridade:** Média  
+**Dicionários afetados:** `TECLAS_ESPECIAIS`, `TECLAS_HOTKEY`
+
+**Descrição:**  
+`f5` e `f9` apareciam tanto em `TECLAS_ESPECIAIS` (teclas de ação) quanto em `TECLAS_HOTKEY` (teclas de controle). Um usuário poderia configurar `f5` como tecla de ação e simultaneamente tê-la como hotkey de toggle ou stop, gerando conflito onde a ação e o comando de controle seriam disparados ao mesmo tempo.
+
+**Correção aplicada:**  
+`f5` e `f9` foram removidos de `TECLAS_ESPECIAIS`. Permanecem disponíveis apenas em `TECLAS_HOTKEY` para uso como teclas de controle.
+
+---
+
+### 🟠 Bug #3 — Thread do loop de ação recriada a cada sessão de uso
+**Prioridade:** Média  
+**Função afetada:** `iniciar_bot()`
+
+**Descrição:**  
+Toda vez que o usuário escolhia `[5] INICIAR BOT` no menu, uma nova thread daemon era criada e iniciada com `threading.Thread(target=loop_acao, daemon=True).start()`. Ao retornar ao menu e iniciar novamente, uma segunda thread era criada, passando a existir dois loops de ação simultâneos — duplicando as ações executadas por ciclo.
+
+**Correção aplicada:**  
+A thread daemon é criada uma única vez por chamada de `iniciar_bot()`. Quando o listener é encerrado (tecla de stop), `estado["ativo"]` volta para `False` e a thread entra em espera, sem ser recriada no próximo acesso ao menu.
+
+---
+
+### 🟠 Bug #5 — Drift acumulado no intervalo entre ações
+**Prioridade:** Média  
+**Função afetada:** `loop_acao()`
+
+**Descrição:**  
+O `time.sleep(estado["intervalo"])` era chamado após a execução da ação, sem descontar o tempo gasto pela própria ação. Com intervalos muito curtos (ex: `0.001s`), o tempo real entre ações era sistematicamente maior que o configurado, e o erro se acumulava ao longo do tempo.
+
+**Código original:**
+```python
+while True:
+    if estado["ativo"]:
+        executar_acao()
+    time.sleep(estado["intervalo"])
+```
+
+**Correção aplicada:**  
+Uso de `time.perf_counter()` com referência acumulada para calcular o tempo restante de sleep, compensando o tempo de execução da ação.
+
+```python
+proximo = time.perf_counter()
+while True:
+    executar_acao_se_ativo()
+    proximo += intervalo
+    sleep_time = proximo - time.perf_counter()
+    if sleep_time > 0:
+        time.sleep(sleep_time)
+    else:
+        proximo = time.perf_counter()  # reseta se atrasou
+```
+
+---
+
+### 🟡 Bug #6 — Limpeza de tela com sequência ANSI incompatível com Windows
+**Prioridade:** Baixa  
+**Função afetada:** `limpar()`
+
+**Descrição:**  
+A sequência `\033[2J\033[H` funciona em terminais Unix/Linux/macOS, mas não funciona no Prompt de Comando (`cmd.exe`) do Windows sem a instalação de `colorama` ou sem habilitar o modo ANSI manualmente.
+
+**Código original:**
+```python
+def limpar():
+    print("\033[2J\033[H", end="")
+```
+
+**Correção aplicada:**
+```python
+import os
+
+def limpar():
+    os.system("cls" if os.name == "nt" else "clear")
+```
+
+---
+
+### 🟡 Bug #7 — Hotkeys de toggle e stop podiam ser configuradas como a mesma tecla
+**Prioridade:** Baixa  
+**Função afetada:** `configurar_hotkeys()`
+
+**Descrição:**  
+Não havia validação que impedisse o usuário de definir a mesma tecla de função tanto para ligar/desligar o bot quanto para encerrá-lo. Nesse cenário, pressionar a tecla causaria comportamento indefinido (qual handler venceria dependeria da ordem de avaliação no `on_key_press`).
+
+**Correção aplicada:**  
+Validação adicionada ao final de `configurar_hotkeys()`: se as teclas resultantes forem iguais, as alterações são descartadas e o usuário é informado.
+
+```python
+if toggle_final == stop_final:
+    print("  ❌ Hotkeys de ligar/desligar e sair não podem ser iguais. Mantendo anteriores.")
+    time.sleep(1.5)
+    return
+```
+
+---
+
+### 🟡 Bug #8 — Campo `estado["thread"]` armazenado mas nunca utilizado
+**Prioridade:** Baixa  
+**Local:** dicionário `estado`, função `iniciar_bot()`
+
+**Descrição:**  
+A referência da thread era salva em `estado["thread"]` mas nunca lida em nenhum outro ponto do código — nem para verificação de estado, nem para join, nem para cancelamento. Era dead code sem nenhum efeito.
+
+**Correção aplicada:**  
+Campo `"thread"` removido do dicionário `estado` e da função `iniciar_bot()`.
+
+---
+
+## Tabela de Referência Rápida
+
+| # | Prioridade | Descrição resumida | Função(ões) afetada(s) |
+|---|------------|---------------------|------------------------|
+| 1 | 🔴 Alta | `str` passada direto ao `pynput` sem conversão para `KeyCode` | `loop_acao` |
+| 2 | 🟠 Média | `f5` e `f9` duplicados em `TECLAS_ESPECIAIS` e `TECLAS_HOTKEY` | constantes globais |
+| 3 | 🟠 Média | Thread do loop recriada a cada sessão, gerando duplicação de ações | `iniciar_bot` |
+| 4 | 🔴 Alta | Acesso ao `estado` sem lock entre múltiplas threads | global |
+| 5 | 🟠 Média | `time.sleep` sem compensação causa drift acumulado no intervalo | `loop_acao` |
+| 6 | 🟡 Baixa | Sequência ANSI para limpar tela não funciona no Windows | `limpar` |
+| 7 | 🟡 Baixa | Sem validação: toggle e stop podiam ser a mesma hotkey | `configurar_hotkeys` |
+| 8 | 🟡 Baixa | `estado["thread"]` armazenado mas nunca lido (dead code) | `estado`, `iniciar_bot` |
